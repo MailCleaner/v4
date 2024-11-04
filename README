@@ -1,18 +1,20 @@
 # Welcome to MailScanner!
 #
-# All the documentation is on-line at
-#			www.mailscanner.info
-#			wiki.mailscanner.info
+# All the documentation is on-line at:
+#
+#	Wiki: http://github.com/MailScanner/v4
+#	Info: http://www.mailscanner.info
+#			
 #
 # The documentation is kept up to date, and the wiki will help you a lot.
 # To install it just run the ./install.sh in the distribution, that will
-# do all the hard work for you, and won't ask any nasty questions.
+# do all the hard work for you, and won't ask any difficult questions.
 # If you are using sendmail, it will leave you with a system that is ready
 # to run, it just requires you change the organisation name. This is set at
 # the top of MailScanner.conf which you will probably find in either
-# /etc/MailScanner or /opt/MailScanner/etc. Once you are happy with it
+# /etc/MailScanner or /etc/MailScanner. Once you are happy with it
 # running, start looking at the configuration files in /etc/MailScanner or
-# /opt/MailScanner/etc.
+# /etc/MailScanner.
 #
 # If you need help and have read all the documentation and the
 # mailscanner.conf file, then join the mailing list and ask there.
@@ -20,3 +22,8 @@
 # already :-)
 #
 # JKF 3 June 2006
+#
+# Updated: Jerry Benton - 26 January 2016
+#
+# Current version: 4.86.1-1
+

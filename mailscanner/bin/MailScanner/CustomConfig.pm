@@ -523,7 +523,7 @@ sub SQLLogging {
 #    Spam Actions              = &InternalActions
 #    High Scoring Spam Actions = &InternalActions
 # in your MailScanner.conf file, having added this code to
-#    /usr/lib/MailScanner/MailScanner/CustomConfig.pm
+#    /usr/share/MailScanner/MailScanner/CustomConfig.pm
 #
 # It uses a configuration file whose path is
 my($InternalAccountList) = '/etc/MailScanner/internal.accounts.conf';
@@ -765,7 +765,7 @@ my($hostname);
 
 my $ConfFile = $ARGV[0];
 $ConfFile = $ARGV[1] if $ConfFile =~ /^-+/i;
-$ConfFile = '/opt/MailScanner/etc/MailScanner.conf' unless $ConfFile && -f $ConfFile;
+$ConfFile = '/etc/MailScanner/MailScanner.conf' unless $ConfFile && -f $ConfFile;
 
 my ($AccessDB, $Refusal, $my_mta); # Generalized here for Multiple MTA support
 $my_mta = lc(MailScanner::Config::QuickPeek($ConfFile, 'mta')) if $ConfFile &&
@@ -1645,7 +1645,7 @@ __DATA__
 #
 #
 
-#!/usr/bin/perl -U -I/usr/lib/MailScanner
+#!/usr/bin/perl -U -I /usr/share/MailScanner/perl
 
 #
 #   MailScanner - SMTP E-Mail Virus Scanner
@@ -1675,7 +1675,7 @@ __DATA__
 #      SO17 1BJ
 #      United Kingdom
 #
-push @INC,"/usr/lib/MailScanner","/opt/MailScanner/lib";
+push @INC,"/usr/share/MailScanner","/var/lib/MailScanner";
 use FileHandle;
 use Fcntl qw(:DEFAULT :flock);
 use Sys::Syslog;

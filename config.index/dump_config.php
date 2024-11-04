@@ -1,10 +1,15 @@
 <?php
-require_once('./conf_array.php');
-error_reporting(0);
+# this file should have been created by make.sh
+require_once('/tmp/conf_array.php');
+if(isset($_GET['v'])){
+	$display_version = 'v'.$_GET['v'];
+}else{
+	$display_version = NULL;
+}
 ?>
 <html>
 <head>
-<title>MailScanner Configuration Dump</title>
+<title>MailScanner Configuration Index</title>
 <style type="text/css">
 <!--
 body {
@@ -39,7 +44,7 @@ th {
 </head>
 <body>
 
-<h1><a href="http://www.mailscanner.info">MailScanner Configuration Index</a></h1>
+<h1>Configuration Index - MailScanner <?php echo $display_version; ?></h1>
 
 <?php
 // Build an index by Full Name
@@ -55,7 +60,11 @@ $i=0;
 while($i<count($index)) {
  echo " <tr>\n";
  for($n=0; $n<$columns; $n++) {
-  echo "  <td><a href=\"#{$index[$i]}\">{$index[$i]}</a></td>\n";
+ 	if(!empty($index[$i])){
+	  	echo "  <td><a href=\"#{$index[$i]}\">{$index[$i]}</a></td>\n";
+	}else{
+		echo "  <td></td>\n";
+	}
   $i++;
  }
  echo " </tr>\n";
@@ -64,7 +73,7 @@ while($i<count($index)) {
 </table>
 <p>
 <b>Further information</b><br/>
-There are <?=count($index)?> configuration option in this version.
+There are <?php echo count($index); ?> configuration options in this version.
 </p>
 <p>
 "First Match" rulesets work through the recipients and stop at the
@@ -102,18 +111,18 @@ foreach($conf as $ckey=>$cval) {
  if(empty($cval['name'])) continue;
  ?>
  <tr>
-  <th>Name:</td><td colspan="5"><b><a name="<?=$cval['name']?>"><?=$cval['name']?></a></b></td>
+  <th>Name:</td><td colspan="5"><b><a name="<?php echo $cval['name']; ?>"><?php echo $cval['name']; ?></a></b></td>
  </tr>
  <tr>
-  <th>Current Value:</th>
-  <td><?=$cval['value']?></td>
+  <th>Distro Value:</th>
+  <td><?php echo $cval['value']; ?></td>
   <th>Default Value:</th>
   <td colspan="3">
    <?php 
    if($cval['type'] == "yesno") {
-    echo "{$cval['values'][$cval['default']]}";
+    echo $cval['values'][$cval['default']];
    } else {
-    echo "{$cval['default']}";
+    echo $cval['default'];
    }
    ?>
   </td>
@@ -128,7 +137,7 @@ foreach($conf as $ckey=>$cval) {
      </tr>
      <?php foreach($cval['values'] as $vkey=>$vval) { ?>
      <tr>
-      <td><?=$vval?></td>
+      <td><?php echo $vval; ?></td>
      </tr>
      <?php } ?>
     </table>
@@ -191,7 +200,6 @@ foreach($conf as $ckey=>$cval) {
 }
 ?>
 </table>
-
 </body>
 </html>
 <html><body></body></html>
