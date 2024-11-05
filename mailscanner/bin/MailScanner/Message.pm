@@ -240,6 +240,36 @@ sub new {
   }
   #  or return 'INVALID'; # Return empty if fails
 
+  ## MailCleaner
+  # find out the real client ip found in headers
+  my @trusted_ips = split / /, MailScanner::Config::Value('trustedips', $this);
+  use Net::CIDR::Lite;
+  my $cidr = Net::CIDR::Lite->new();
+  $cidr->add_any('127.0.0.1');
+  foreach my $tip (@trusted_ips) {
+    eval { $cidr->add_any($tip); }
+  }
+  my $twolines = 0;
+  foreach my $hl ($global::MS->{mta}->OriginalMsgHeaders($this)) {
+    if ( $hl =~ m/^received:\s+from[^\[]+\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|[a-f0-9:]{3,39})\]/i ) {
+      my $ip = $1;
+      if (! $cidr->find($ip) ) {
+        $this->{clientip} = $ip;
+        last;
+      }
+    } elsif ( $hl =~ m/^received:\s+from\s+/i) {
+      $twolines = 1;
+    }
+    if ($twolines && $hl =~ m/\(?\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|[a-f0-9:]{3,39})\]\)?/i) {
+      my $ip = $1;
+      if (! $cidr->find($ip) ) {
+        $this->{clientip} = $ip;
+        last;
+      }
+    }
+  }
+  ## end MailCleaner
+
   # Work out the user @ domain components
   ($user, $domain) = address2userdomain($this->{from});
   $this->{fromuser} = $user;
@@ -408,7 +438,7 @@ sub new {
     $this->{scanmail} = 0;
     $this->{scanvirusonly} = 0;
   }
-
+  
   # Are we running in DKIM-friendly mode?
   # Require Multiple Headers = add
   # and Add New Headers At Top = yes
@@ -558,6 +588,14 @@ sub IsSpam {
   my $LogNonSpam = MailScanner::Config::Value('lognonspam');
   my $LocalSpamText = MailScanner::Config::LanguageValue($this, 'spam');
   my $LocalNotSpamText = MailScanner::Config::LanguageValue($this, 'notspam');
+  ## MailCleaner
+  # Enable profiler
+  my $profiler = MailScanner::Profiler::new();
+  # Track if dropped in batch mode
+  $this->{batchdropped} = 0;
+  # Track if newsletter module hit
+  $this->{isnewsletter} = 0;  # set by IsSpam
+  ## end MailCleaner
 
   #print STDERR "MTime{" . $this->{id} . "} = " . $this->{mtime} . "\n";
 
@@ -581,6 +619,152 @@ sub IsSpam {
   $this->{ishigh} = 0;
   $this->{spamreport} = "";
   $this->{sascore} = 0;
+
+  ## MailCleaner
+  ## add pre filter check
+  my $class = "MailScanner::Accounting";
+  my $accounting = undef;
+  if (eval "require $class") {
+    $accounting = MailScanner::Accounting::new('pre');
+  }
+  if (defined($accounting) && ! $accounting->checkCheckeable($this)) {
+    my $report = $accounting->getLastMessage();
+    MailScanner::Log::InfoLog("Message %s from %s (%s) to %s" .
+                               " cannot be checked against spam (%s)",
+                               $this->{id}, $this->{clientip},
+                               $this->{from}, $todomain, $report);
+        $this->{prefilterreport} = "cannot be checked against spam (".$report.")";
+        $this->{spamreport} = $this->{prefilterreport};
+        $this->{spamreport} = $this->ReflowHeader(
+                       MailScanner::Config::Value('spamheader',$this),
+                       $this->{spamreport});
+        return 0;
+  }
+
+  $profiler->start('Prefilters');
+  my $prefilters = MailScanner::Config::Value('prefilters', $this);
+
+  my $maxsize = 1000000;  ## 1MB for now...
+
+  my $iscachedspam = 0;
+  my $cachehash = 0;
+  my $md5digest = 0;
+  $profiler->start('SpamCacheCheck');
+  if (MailScanner::SpamCache::isUseable() && $this->{size} < $maxsize) {
+    my (@wholeBody);
+    push(@wholeBody, "\n");
+    $this->{store}->ReadBody(\@wholeBody, 0);
+
+    my $md5 = Digest::MD5->new;
+    eval { $md5->add(@wholeBody) };
+    if ($@ ne "" || @wholeBody<=1) {
+       # The eval failed
+       $md5digest = 0;
+    } else {
+       # The md5->add worked okay, so use the results
+       # Get the MD5 digest of the message body
+       $md5digest = $md5->hexdigest;
+
+       if ($cachehash = MailScanner::SpamCache::CheckCache($md5digest)) {
+         $iscachedspam = 1;
+         ## got cache hit
+         MailScanner::SpamCache::CacheExpire();
+       }
+   }
+  }
+
+  if ($iscachedspam && $cachehash) {
+        $this->{isspam} = 1;
+        $this->{isprefilter} = 1;
+        $this->{ishigh} = 1;
+        my $cachedreport = uncompress($cachehash->{spamreport});
+        MailScanner::Log::InfoLog("Message %s from %s (%s) to %s" .
+                               " is spam (cached)%s",
+                               $this->{id}, $this->{clientip},
+                               $this->{from}, $todomain, $cachedreport);
+        $this->{prefilterreport} = "(cached)".$cachedreport;
+        $this->{spamreport} = "(cached)".$cachedreport;
+        $this->{spamreport} = $this->ReflowHeader(
+                       MailScanner::Config::Value('spamheader',$this),
+                       $this->{spamreport});
+        $profiler->stop('SpamCacheCheck');
+        $profiler->log('Profiled SpamCheck for message '.$this->{id}.':');
+        return 1;
+  } else {
+    $profiler->stop('SpamCacheCheck');
+    my $preHitString = "";
+    foreach my $prefilter (split(' ', $prefilters)) {
+      my $isdecisive = 0;
+      my $isnegativedecisive = 0;
+      if ($prefilter =~ m/^(\S+):(0|1):(0|1)$/) {
+        $prefilter = $1;
+        $isdecisive = $2;
+        $isnegativedecisive = $3;
+      }
+      #profiler->start($prefilter.'_Init');
+      my $location       = "MailScanner/PreFilters/$prefilter.pm";
+      my $class          = "MailScanner::$prefilter";
+      require $location;
+      #$profiler->stop($prefilter.'_Init');
+      $profiler->start($prefilter.'_Check');
+      $0 = $this->{current_status}." - ".$this->{id}." - ".$prefilter;
+      my $is_prespam = $class->Checks($this);
+      $profiler->stop($prefilter.'_Check');
+
+      $this->{prefilterreport} =~ s/,\s+$//;
+      #$this->{prefilterreport} =~ s/^,\s+//;
+
+      if ($is_prespam == 1 && $isdecisive) {
+        $this->{isspam} = 1;
+        $this->{isprefilter} = 1;
+        if ($is_prespam > 1) {
+          $this->{ishigh} = 1;
+        }
+        MailScanner::Log::InfoLog("Message %s from %s (%s) to %s" .
+                               " is spam%s%s",
+                               $this->{id}, $this->{clientip},
+                               $this->{from}, $todomain, $preHitString, $this->{prefilterreport});
+        $this->{spamreport} = ($this->{isspam})?$LocalSpamText:$LocalNotSpamText;
+        $this->{spamreport} .= $this->{prefilterreport};
+        $this->{spamreport} = $this->ReflowHeader(
+                       MailScanner::Config::Value('spamheader',$this),
+                       $this->{spamreport});
+        $profiler->stop('Prefilters');
+        $profiler->log('Profiled SpamCheck for message '.$this->{id}.':');
+        if ($md5digest) {
+          MailScanner::SpamCache::CacheResult($md5digest, compress($this->{prefilterreport}));
+        }
+        return 1;
+      }
+      if ($is_prespam == 0 && $isnegativedecisive) {
+        MailScanner::Log::InfoLog("Message %s from %s (%s) to %s" .
+                                " is not spam%s%s",
+                                $this->{id}, $this->{clientip},
+				$this->{from}, $todomain, $preHitString, $this->{prefilterreport});
+        $this->{spamreport} = ($this->{isspam})?$LocalSpamText:$LocalNotSpamText;
+        $this->{spamreport} .= $this->{prefilterreport};
+        $this->{spamreport} = $this->ReflowHeader(
+                  MailScanner::Config::Value('spamheader',$this),
+                  $this->{spamreport});
+        $profiler->stop('Prefilters');
+        $profiler->log('Profiled SpamCheck for message '.$this->{id}.':');
+        return 0;
+      }
+      ## Florian Billebault - Newsletter specific
+      if ($is_prespam == -1 && $isdecisive == 0 && $isnegativedecisive == 0) {
+	  $this->{isnewsletter} = 1;
+	  $this->{isprefilter} = 1;
+	  $preHitString .= "(hit: " . $prefilter . ")";
+	  $this->{spamreport} = ($this->{isspam})?$LocalSpamText:$LocalNotSpamText;
+	  $this->{spamreport} .= $this->{prefilterreport};
+	  $this->{spamreport} = $this->ReflowHeader(
+	      MailScanner::Config::Value('spamheader',$this),
+	      $this->{spamreport});
+      }
+      ## End of Newsletter_specifics
+    }
+  }
+  ## end MailCleaner
 
   # Work out if they always want the SA header
   $includesaheader = MailScanner::Config::Value('includespamheader', $this);
@@ -911,38 +1095,54 @@ sub IsSpam {
 
   return $this->{isspam};
 }
+
+
+## MailCleaner
+# Tag subject with newsletter
+# This should not be hit. Tagging should be done by SpamHandler
+sub HandleOtherThing {
+    my($this, $OtherThing) = @_;
     
+    if ($OtherThing eq 'newsletter') {
+	$global::MS->{mta}->PrependHeaderToOriginal($this, 'Subject:', '{MC_NEWS}', '');
+    }
+}
+## end MailCleaner
 
 # Do whatever is necessary with this message to deal with spam.
 # We can assume the message passed is indeed spam (isspam==true).
 # Call it with either 'spam' or 'nonspam'. Don't use 'ham'!
 sub HandleHamAndSpam {
   my($this, $HamSpam) = @_;
-
+  
   my($actions, $action, @actions, %actions);
   my(@extraheaders, $actionscopy, $actionkey);
-
+  
   # Set default action for DMX/MailWatch reporting
   $this->{actions} = 'deliver';
-
+  
   # Get a space-separated list of all the actions
   if ($HamSpam eq 'nonspam') {
-	#print STDERR "Looking up hamactions\n";
-	$actions = MailScanner::Config::Value('hamactions', $this);
-	# Fast bail-out if it's just the simple "deliver" case that 99% of
-	# people will use
-	# Can't do this with SA rule actions: return if $actions eq 'deliver';
-  } else {	
-	# It must be spam as it's not ham
-	if ($this->{ishigh}) {
+    #print STDERR "Looking up hamactions\n";
+    $actions = MailScanner::Config::Value('hamactions', $this);
+    # Fast bail-out if it's just the simple "deliver" case that 99% of
+    # people will use
+    # Can't do this with SA rule actions: return if $actions eq 'deliver';
+  ## MailCleaner
+  # Only flag spam action if 'spam', otherwise ignore if 'newsletter'
+  #} else {
+  } elsif ($HamSpam eq 'spam') {
+  ## end MailCleaner
+      # It must be spam as it's not ham
+      if ($this->{ishigh}) {
 	  #print STDERR "Looking up highscorespamactions\n";
 	  $actions = MailScanner::Config::Value('highscorespamactions', $this);
-	} else {
+      } else {
 	  #print STDERR "Looking up spamactions\n";
 	  $actions = MailScanner::Config::Value('spamactions', $this);
-	}
+      }
   }
-
+  
   # Find all the bits in quotes, with their spaces
   $actionscopy = $actions;
   #print STDERR "Actions = \'$actions\'\n";
@@ -6523,6 +6723,82 @@ sub DisarmHTML {
   $DisarmCodebaseTag = 1 if $this->{tagstoconvert} =~ /data/i;
   $DisarmIframeTag   = 1 if $this->{tagstoconvert} =~ /iframe/i;
   $DisarmWebBug      = 1 if $this->{tagstoconvert} =~ /webbug/i;
+
+  ## MailCleaner
+  # whitelist HTML controls
+  my $wl_HTML = '/var/mailcleaner/spool/tmp/mailscanner/whitelist_HTML';
+  my $HTML_whitelisted = 0;
+  my @cidr;
+
+  foreach my $header_line (@{$this->{headers}}) {
+       if ( $header_line =~ /^X-MailCleaner-HTML-WL: Ok$/ ) {
+               $DisarmFormTag     = 0;
+               $DisarmScriptTag   = 0;
+               $DisarmCodebaseTag = 0;
+               $DisarmCodebaseTag = 0;
+               $DisarmIframeTag   = 0;
+               $DisarmWebBug      = 0;
+
+#               # Logging
+               MailScanner::Log::NoticeLog('Message '.$this->{id}." : the address ".$this->{clientip} ." is whitelisted for HTML controls", $this->{id});
+		$HTML_whitelisted = 1;
+       }
+  }
+  if ( ! $HTML_whitelisted ) {
+    if ( -e $wl_HTML ) {
+       # get information for the Body From
+       my $bf_addr = '';
+       foreach my $header_line (@{$this->{headers}}) {
+               $bf_addr = $1 if ( $header_line =~ /^From:.*\s<?(.*)$/ );
+       }
+       my ($bf_user, $bf_domain) = address2userdomain($bf_addr);
+
+       # Parse the file for whitelisted addresses
+       my $is_whitelisted = 0;
+       my $addr = '';
+       open FH, '<', $wl_HTML;
+       while ($addr = <FH>) {
+               # function address2userdomain cannot apply here
+               chomp($addr);
+               $addr = lc($addr);
+               $addr =~ s/^<\s*//; # Delete leading and
+               $addr =~ s/\s*>$//; # trailing <>
+
+               my($user, $domain);
+               $user = $domain = $addr;
+
+               # Test the addresses, get out of the while as soon as we know we have a whitelisted element
+               if ($addr =~ /@/) {
+                       $user   =~ s/@[^@]*$//;
+                       $domain =~ s/^[^@]*@//;
+
+                       if ( ( ($this->{'fromuser'} eq $user) && ($this->{'fromdomain'} eq $domain) ) || ( ($bf_user eq $user) && ($bf_domain eq $domain) ) ) {
+                               $is_whitelisted = 1;
+                               last;
+                       }
+               } elsif ( ($this->{'fromdomain'} eq $addr) || ($bf_domain eq $addr) ) {
+                       $is_whitelisted = 1;
+                       last;
+               }
+       }
+       close FH;
+
+       # Apply whitelist
+       if ( $is_whitelisted ) {
+               $DisarmFormTag     = 0;
+               $DisarmScriptTag   = 0;
+               $DisarmCodebaseTag = 0;
+               $DisarmCodebaseTag = 0;
+               $DisarmIframeTag   = 0;
+               $DisarmWebBug      = 0;
+
+               # Logging
+               MailScanner::Log::NoticeLog('Message '.$this->{id}." : the address $addr is whitelisted for HTML controls", $this->{id});
+       }
+    }
+  }
+  # end MailCleaner
+
   $PhishingSubjectTag= 1
     if MailScanner::Config::Value('tagphishingsubject', $this) =~ /1/;
   #print STDERR "PhishingSubjectTag = $PhishingSubjectTag\n";
@@ -7045,11 +7321,19 @@ sub DisarmHTMLEntity {
   return @DisarmDoneSomething;
 }
 
+## MailCleaner
+# Track body position better to more selectively disarm
+our ($DisarmInsideHead, $DisarmInsideScript) = ( 0, 0 );
+## end MailCleaner
+
 # HTML::Parser callback for text so we can collect the contents of links
 sub DisarmTextCallback {
   my($text) = @_;
 
-  unless ($DisarmInsideLink) {
+  ## MailCleaner
+  #unless ($DisarmInsideLink) {
+  ## end MailCleaner
+  unless ($DisarmInsideLink || ( $DisarmInsideHead && $DisarmInsideScript )) {
     print $text;
     #print STDERR "DisarmText just printed \"$text\"\n";
     return;
@@ -7070,10 +7354,20 @@ sub DisarmTagCallback {
   my $output = "";
   my $webbugfilename;
 
-  if ($tagname eq 'form' && $DisarmFormTag) {
+  ## MailCleaner
+  #if ($tagname eq 'form' && $DisarmFormTag) {
+  if ($tagname eq 'head') {
+    $DisarmInsideHead = 1;
+    $output .= $text;
+  } elsif ($tagname eq 'form' && $DisarmFormTag) {
+  ## end MailCleaner
     #print "It's a form\n";
     $text = substr $text, 1;
-    $output .= "<BR><MailScannerForm$$ " . $text;
+    ## MailCleaner
+    # Hide disabled elements
+    #$output .= "<BR><MailScannerForm$$ " . $text;
+    $output .= "<BR><MailScannerForm$$ style=\"display: none;\" " . $text;
+    ## end MailCleaner
     $DisarmDoneSomething{'form'} = 1;
   } elsif ($tagname eq 'input' && $DisarmFormTag) {
     #print "It's an input button\n";
@@ -7099,11 +7393,19 @@ sub DisarmTagCallback {
     #print "It's an object\n";
     if (exists $attr->{'codebase'}) {
       $text = substr $text, 1;
-      $output .= "<MailScannerObject$$ " . $text;
+      ## MailCleaner
+      # Hide disabled elements
+      #$output .= "<MailScannerObject$$ " . $text;
+      $output .= "<MailScannerObject$$ style=\"display: none;\" " . $text;
+      ## end MailCleaner
       $DisarmDoneSomething{'object codebase'} = 1;
     } elsif (exists $attr->{'data'}) {
       $text = substr $text, 1;
-      $output .= "<MailScannerObject$$ " . $text;
+      ## MailCleaner
+      # Hide disabled elements
+      #$output .= "<MailScannerObject$$ " . $text;
+      $output .= "<MailScannerObject$$ style=\"display: none;\" " . $text;
+      ## end MailCleaner
       $DisarmDoneSomething{'object data'} = 1;
     } else {
       $output .= $text;
@@ -7111,12 +7413,23 @@ sub DisarmTagCallback {
   } elsif ($tagname eq 'iframe' && $DisarmIframeTag) {
     #print "It's an iframe\n";
     $text = substr $text, 1;
-    $output .= "<MailScannerIFrame$$ " . $text;
+    ## MailCleaner
+    # Hide disabled elements
+    #$output .= "<MailScannerIFrame$$ " . $text;
+    $output .= "<MailScannerIFrame$$ style=\"display: none;\" " . $text;
+    ## end MailCleaner
     $DisarmDoneSomething{'iframe'} = 1;
   } elsif ($tagname eq 'script' && $DisarmScriptTag) {
     #print "It's a script\n";
     $text = substr $text, 1;
-    $output .= "<MailScannerScript$$ " . $text;
+    $DisarmInsideScript = 1;
+    unless ($DisarmInsideHead) {
+      ## MailCleaner
+      # Hide disabled elements
+      #$output .= "<MailScannerScript$$ " . $text;
+      $output .= "<MailScannerScript$$ style=\"display: none;\" " . $text;
+      ## end MailCleaner
+    }
     $DisarmDoneSomething{'script'} = 1;
   } elsif ($tagname eq 'a' && $DisarmPhishing) {
     #print STDERR "It's a link\n";
@@ -7206,15 +7519,28 @@ sub DisarmTagCallback {
 sub DisarmEndtagCallback {
   my($tagname, $text, $id) = @_;
 
-  if ($tagname eq 'iframe' && $DisarmIframeTag) {
+  ## MailCleaner
+  # Add tracing for head tag
+  #if ($tagname eq 'iframe' && $DisarmIframeTag) {
+  if ($tagname eq 'head') {
+    $DisarmInsideHead = 0;
+    print $text;
+  } elsif ($tagname eq 'iframe' && $DisarmIframeTag) {
+  ## end MailCleaner
     print "</MailScannerIFrame$$>";
     $DisarmDoneSomething{'iframe'} = 1;
   } elsif ($tagname eq 'form' && $DisarmFormTag) {
     print "</MailScannerForm$$>";
     $DisarmDoneSomething{'form'} = 1;
   } elsif ($tagname eq 'script' && $DisarmScriptTag) {
-    print "</MailScannerScript$$>";
+    ## MailCleaner
+    # print "</MailScannerScript$$>";
+    $DisarmInsideScript = 0;
+    unless ($DisarmInsideHead) {
+      print "</MailScannerScript$$>";
+    }
     $DisarmDoneSomething{'script'} = 1;
+    # end MailCleaner
   } elsif ($tagname eq 'map' && $DisarmAreaURL) {
     # We are inside an imagemap that is part of a phishing imagemap
     $DisarmLinkText .= '</map>';
@@ -7900,7 +8226,7 @@ sub WordDecoderKeep7Bit {
 ## A filename is evil unless it only contains any of the following:
 ##  \%\(\)\+\,\-\.0-9\=A-Z_a-z\x80-\xFF
 ## To get the correct pattern match string, do this:
-## print '\x00-\x1F\x7F' . quotemeta(' !"Â£$&') . quotemeta("'") .
+## print '\x00-\x1F\x7F' . quotemeta(' !"£$&') . quotemeta("'") .
 ##       quotemeta('*/:/<>?@[\]^`{|}~') . "\n";
 ## print ' ' . quotemeta('%()+,-.') . '0-9' . quotemeta('=') .
 ##       'A-Z' . quotemeta('_') . 'a-z' . quotemeta('{}') . '\x80-\xFF' . "\n";
@@ -8048,46 +8374,6 @@ sub extract
 
     shift @$lines
         if @$lines && $lines->[0] =~ /^\s*$/o;
-
-    $self;
-}
-
-#
-# Over-ride the read function similar to extract but reads from file
-# Only change is my comment below. MAS
-#
-
-sub read
-{   my ($self, $fd) = @_;
-
-    $self->empty;
-
-    my ($tag, $line);
-    my $ln = '';
-    while(1)
-    {   $ln = <$fd>;
-
-        if(defined $ln && defined $line && $ln =~ /\A[ \t]+/o)
-        {   $line .= $ln;
-            next;
-        }
-
-        if(defined $line)
-        {   ($tag, $line) = _fmt_line $self, $tag, $line;
-            _insert $self, $tag, $line, -1
-                if defined $line;
-        }
-
-        # MAS - Change begins here
-        if ( defined $ln && $ln =~ /^($FIELD_NAME|From )/o ) {
-
-            ($tag, $line) = ($1, $ln);
-        } elsif ($ln =~ /^$/) {
-            # Only stop on empty line - just drop a non-header,
-            # non continuation line
-            last;
-        } # MAS End of change
-    }
 
     $self;
 }

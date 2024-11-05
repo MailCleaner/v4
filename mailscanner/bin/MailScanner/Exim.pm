@@ -286,7 +286,7 @@ sub ReadQf {
   # items corresponding to Exim's names for them,
   # and tracking them in %{$metadata{dashvars}}
   while (chomp($line = <$RQf>)) {
-    $line =~ s/^-(\w+) ?// or last;
+    $line =~ s/^--?(\w+) ?// or last;
     # ACLs patch starts here
     #$metadata{dashvars}{$1} = 0;
     #$line eq "" and $metadata{"dv_$1"} = 1, next;
@@ -836,6 +836,17 @@ sub AddHeader {
   return 1;
 }
 
+## MailCleaner
+sub AddHeaderToOriginal {
+  my($this, $message, $newkey, $newvalue) = @_;
+  my($newheader);
+  $newvalue = " " unless defined $newvalue;
+  chomp($newvalue);
+  $newheader = $newkey.": ".$newvalue;
+  push @{$message->{headers}}, $newheader;
+  return 1;
+}
+## end MailCleaner
 
 # This is how we build the entry that goes in the -H file
 #    sprintf("%03d  ", length($newheader)+1) . $newheader . "\n";
@@ -970,6 +981,18 @@ sub PrependHeader {
   return 1;
 }
 
+## MailCleaner
+sub PrependHeaderToOriginal {
+  my($this, $message, $key, $data, $sep) = @_;
+  
+  $data = "" unless defined $data;
+  chomp($data);
+  foreach my $tmp (@{$message->{headers}}) {
+      $tmp =~ s/^Subject:/Subject:\{MC_NEWS\}/;
+  }
+  return 1;
+}
+## end MailCleaner
 
 sub TextStartsHeader {
   my($this, $message, $key, $text) = @_;

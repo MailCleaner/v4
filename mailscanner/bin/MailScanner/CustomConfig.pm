@@ -37,6 +37,10 @@ no  strict 'subs'; # Allow bare words for parameter %'s
 
 use vars qw($VERSION);
 
+## Olivier Diserens for MailCleaner
+require 'MailScanner/MailWatch.pm';
+## end MailCleaner
+
 ### The package version, both in 1.23 style *and* usable by MakeMaker:
 $VERSION = substr q$Revision: 4378 $, 10;
 
@@ -523,7 +527,7 @@ sub SQLLogging {
 #    Spam Actions              = &InternalActions
 #    High Scoring Spam Actions = &InternalActions
 # in your MailScanner.conf file, having added this code to
-#    /usr/share/MailScanner/MailScanner/CustomConfig.pm
+#    /usr/lib/MailScanner/MailScanner/CustomConfig.pm
 #
 # It uses a configuration file whose path is
 my($InternalAccountList) = '/etc/MailScanner/internal.accounts.conf';
@@ -746,7 +750,14 @@ use FileHandle;
 use Net::CIDR;
 use Socket;
 use POSIX qw(:signal_h); # For Solaris 9 SIG bug workaround
+use IO::Handle;
+use IO::Seekable;
+use IO::File;
 use IO::Pipe;
+use IO::Socket;
+use IO::Dir;
+use IO::Select;
+use IO::Poll;
 BEGIN { @AnyDBM_File::ISA = qw(DB_File GDBM_File NDBM_File SDBM_File) }
 use AnyDBM_File;
 
@@ -765,7 +776,7 @@ my($hostname);
 
 my $ConfFile = $ARGV[0];
 $ConfFile = $ARGV[1] if $ConfFile =~ /^-+/i;
-$ConfFile = '/etc/MailScanner/MailScanner.conf' unless $ConfFile && -f $ConfFile;
+$ConfFile = '/opt/MailScanner/etc/MailScanner.conf' unless $ConfFile && -f $ConfFile;
 
 my ($AccessDB, $Refusal, $my_mta); # Generalized here for Multiple MTA support
 $my_mta = lc(MailScanner::Config::QuickPeek($ConfFile, 'mta')) if $ConfFile &&
@@ -1645,7 +1656,7 @@ __DATA__
 #
 #
 
-#!/usr/bin/perl -U -I /usr/share/MailScanner/perl
+#!/usr/bin/perl -I/usr/lib/MailScanner
 
 #
 #   MailScanner - SMTP E-Mail Virus Scanner
@@ -1675,7 +1686,7 @@ __DATA__
 #      SO17 1BJ
 #      United Kingdom
 #
-push @INC,"/usr/share/MailScanner","/var/lib/MailScanner";
+push @INC,"/usr/lib/MailScanner","/opt/MailScanner/lib";
 use FileHandle;
 use Fcntl qw(:DEFAULT :flock);
 use Sys::Syslog;

@@ -264,6 +264,7 @@ whitelistmaxrecips		= ignorespamwhitelistifrecipientsexceed
 workuser			= incomingworkuser
 workgroup			= incomingworkgroup
 workperms			= incomingworkpermissions
+eximcommand			= EximCommand
 
 
 #
@@ -571,7 +572,7 @@ HighSpamSubjectText		{Spam?}
 Hostname			the MailScanner
 IDHeader			X-MailScanner-ID:
 InfoHeader			
-InfoValue			Please contact an administrator for more information
+InfoValue			Please contact the administrator for more information
 IPVerHeader			
 LocalPostmaster			postmaster
 MailHeader			X-MailScanner:
@@ -687,3 +688,15 @@ allowfiletypes
 denyfilenames
 saactions
 
+## MailCleaner
+profile                 0       no      0       yes     1
+PreFilterTimeout                20
+PreFilters              ""
+PreFilterConfigurations ""
+TrustedIps
+AdditionalLibraryPaths
+usespamcache            0       no      0       yes     1
+spamcachedatabasefile
+spamcachetimings
+EximCommand             /opt/exim4/bin/exim
+## end MailCleaner

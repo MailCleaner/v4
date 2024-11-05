@@ -2,7 +2,7 @@
 #   MailScanner - SMTP E-Mail Virus Scanner
 #   Copyright (C) 2002  Julian Field
 #
-#   $Id: MessageBatch.pm 5048 2010-08-03 11:19:15Z sysjkf $
+#   $Id: MessageBatch.pm 5115 2012-11-10 13:11:25Z sysjkf $
 #
 #   This program is free software; you can redistribute it and/or modify
 #   it under the terms of the GNU General Public License as published by
@@ -48,7 +48,7 @@ use DBI qw(:sql_types);
 use vars qw($VERSION);
 
 ### The package version, both in 1.23 style *and* usable by MakeMaker:
-$VERSION = substr q$Revision: 5048 $, 10;
+$VERSION = substr q$Revision: 5115 $, 10;
 
 my $maxcleanbytes    = 0;
 my $maxcleanmessages = 0;
@@ -257,13 +257,24 @@ sub SpamChecks {
   # If the cache contents have expired then clean it all up first
   MailScanner::SA::CheckForCacheExpire();
 
+## MailCleaner
+  my $mc_msgpos = 0;
+  my $mc_nbmsgs = keys(%{$this->{messages}});
+## end MailCleaner
   while(($id, $message) = each %{$this->{messages}}) {
+## MailCleaner
+    $mc_msgpos++;
+## end MailCleaner
     next if !$message->{scanmail};
     next if $message->{deleted};
     next if $message->{scanvirusonly}; # Over-rides Spam Checks setting
     next unless MailScanner::Config::Value('spamchecks', $message) =~ /1/;
  
     #print STDERR "Spam checks for $id\n";
+## MailCleaner
+    $0 = 'MailScanner: spam checks ('.$mc_msgpos."/".$mc_nbmsgs.')';
+    $message->{current_status} = 'MailScanner: spam checks ('.$mc_msgpos."/".$mc_nbmsgs.')';
+## end MailCleaner
 
     # Tell SpamAssassin to apply rules to binary attachments
     # This relies on a patch to Util.pm in SpamAssassin, fetch the patch from
@@ -331,6 +342,27 @@ sub HandleHam {
 
   #print STDERR "Finished handling ham\n\n";
 }
+
+## MailCleaner
+# Handle the newsletter results using the actions deliver only
+sub HandleOtherThings {
+  my $this = shift;
+
+  my($id, $message);
+
+  #print STDERR "Starting to handle newsletter\n";
+
+  while(($id, $message) = each %{$this->{messages}}) {
+    # Skip deleted and manage only newsletter
+    #print STDERR "Deleted = " . $message->{deleted} . ", isspam = " . $message->{isspam} . ", scanmail = " . $message->{scanmail} . ", spamwhitelisted = " . $message->{spamwhitelisted} . "\n";
+    next if  $message->{deleted} ||
+            !$message->{isnewsletter};
+
+    #print STDERR "Newsletter checks for $id\n";
+    $message->HandleOtherThing('newsletter');
+  }
+}
+## end MailCleaner
 
 # Reject messages that come from people we want to reject. Send nice report
 # instead.
@@ -1379,6 +1411,9 @@ sub DropBatch {
     $message->{deleted} = 1;
     $message->{gonefromdisk} = 1; # Don't try to delete the original
     $message->{store}->Unlock(); # Unlock it so other processes can pick it up
+## MailCleaner
+    $message->{batchdropped} = 1;
+## end MailCleaner
   }
 
   # This is a very good place for a snooze.

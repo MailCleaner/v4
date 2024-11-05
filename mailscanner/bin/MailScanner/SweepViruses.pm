@@ -149,7 +149,7 @@ my %Scanners = (
   "clamav"  => {
     Name		=> 'ClamAV',
     Lock                => 'clamavBusy.lock',
-    CommonOptions       => '-r --infected --stdout',
+    CommonOptions       => '-r --no-summary --stdout',
     DisinfectOptions    => '',
     ScanOptions         => '',
     InitParser          => \&InitClamAVParser,
@@ -179,6 +179,19 @@ my %Scanners = (
     SupportScanning     => $S_SUPPORTED,
     SupportDisinfect    => $S_NONE,
   },
+  ## MailCleaner
+  "esetsefs"            => {
+    Name                => 'esetsefs',
+    Lock                => 'esetsefsBusy.lock',
+    CommonOptions       => '-s --profile="@In-depth scan"',
+    DisinfectOptions    => '',
+    ScanOptions         => '--readonly',
+    InitParser          => \&InitEsetsEFSParser,
+    ProcessOutput       => \&ProcessEsetsEFSOutput,
+    SupportScanning     => $S_SUPPORTED,
+    SupportDisinfect    => $S_SUPPORTED,
+  },
+  ## end MailCleaner
   "none"		=> {
     Name		=> 'None',
     Lock		=> 'NoneBusy.lock',
@@ -233,7 +246,6 @@ sub initialise {
     #print STDERR "ClamAV Module in use\n";
     InitialiseClam();
   }
-
 }
 
 sub InitialiseClam {
@@ -382,7 +394,7 @@ sub SAVIUpgraded {
   #               '/usr/local/Sophos/ide');
   #$idemtime = $result[9];
   @result = stat(MailScanner::Config::Value('sophoslib') ||
-  				  '/opt/sophos-av/lib/sav');
+                 '/opt/sophos-av/lib/sav');
   #               '/usr/local/Sophos/lib');
   $libmtime = $result[9];
 
@@ -460,10 +472,14 @@ sub ScanBatch {
   $success = TryCommercial($batch, '.', $BaseDir, \%Reports, \%Types,
                            \$NumInfections, $ScanType);
   #print STDERR "Found $NumInfections infections\n";
-  if ($success eq 'ScAnNeRfAiLeD') {
+  ## MailCleaner
+  # Ignore drop batch on scanner failure
+  #if ($success eq 'ScAnNeRfAiLeD') {
+  if ($success eq 'ScAnNeRfAiLeD' && 0) {
+  ## End MailCleaner
     # Delete all the messages from this batch as if we weren't scanning
     # them, and reject the batch.
-    MailScanner::Log::WarnLog("Virus Scanning: No virus scanners worked, so message batch was abandoned and retried!");
+    MailScanner::Log::WarnLog("Virus Scanning: No virus scanners worked, so message batch was abandoned and re-tried!");
     $batch->DropBatch();
     return 1;
   } 
@@ -485,10 +501,13 @@ sub ScanBatch {
       $success = TryCommercial($batch, "./$id", $BaseDir, \%Reports,
                                \%Types, \$NumInfections, $ScanType);
       # If none of the scanners worked, then we need to abandon this batch
-      if ($success eq 'ScAnNeRfAiLeD') {
+      ## MailCleaner
+      #if ($success eq 'ScAnNeRfAiLeD') {
+      if ($success eq 'ScAnNeRfAiLeD' && 0) {
+      ## End MailCleaner
         # Delete all the messages from this batch as if we weren't scanning
         # them, and reject the batch.
-        MailScanner::Log::WarnLog("Virus Scanning: No virus scanners worked, so message batch was abandoned and retried!");
+        MailScanner::Log::WarnLog("Virus Scanning: No virus scanners worked, so message batch was abandoned and re-tried!");
         $batch->DropBatch();
         last;
       } 
@@ -877,7 +896,7 @@ sub TryOneCommercial {
   return 'ScAnNeRfAiLeD' if $ScannerFailed;
 
   # Return failure if the command timed out, otherwise return success
-  MailScanner::Log::WarnLog("AV engine $scanner timed out") if $TimedOut;
+  MailScanner::Log::WarnLog("AV engine $scanner timed out!") if $TimedOut;
   return 0 if $TimedOut;
   return 1;
 }
@@ -1126,6 +1145,18 @@ sub InitAvgParser {
   ;
 }
 
+## MailCleaner
+# Initialise any state variables the esets output parser uses
+sub InitesetsParser {
+  ;
+}
+
+# Initialise any state variables the esets output parser uses
+sub InitEsetsEFSParser {
+  ;
+}
+## end MailCleaner
+
 # These functions must be called with, in order:
 # * The line of output from the scanner
 # * The MessageBatch object the reports are written to
@@ -1373,118 +1404,6 @@ sub ProcessSophosOutput {
   return 1;
 }
 
-sub ProcessFSecureOutput {
-  my($line, $infections, $types, $BaseDir, $Name) = @_;
-
-  my($report, $infected, $dot, $id, $part, @rest);
-  my($logout, $virus, $BeenSeen);
-
-  chomp $line;
-  #print STDERR "$line\n";
-  #print STDERR "InHeader $fsecure_InHeader\n";
-  #system("echo -n '$line' | od -c");
-
-  # Lose header
-  if ($fsecure_InHeader < 0 && $line =~ /version ([\d.]+)/i &&
-      !$fsecure_Version) {
-    $fsecure_Version = $1 + 0.0;
-    $fsecure_InHeader -= 2 if $fsecure_Version >= 4.51 &&
-                              $fsecure_Version < 4.60;
-    $fsecure_InHeader -= 2 if $fsecure_Version <= 3.0; # For F-Secure 5.5
-    #MailScanner::Log::InfoLog("Found F-Secure version $1=$fsecure_Version\n");
-    #print STDERR "Version = $fsecure_Version\n";
-    return 0;
-  }
-  if ($line eq "") {
-    $fsecure_InHeader++;
-    return 0;
-  }
-  # This test is more vague than it used to be, but is more tolerant to
-  # output changes such as extra headers. Scanning non-scanning data is
-  # not a great idea but causes no harm.
-  # Before version 7.01 this was 0, but header changed again!
-  $fsecure_InHeader >= -1 or return 0;
-
-  $report = $line;
-  $logout = $line;
-  $logout =~ s/%/%%/g;
-  $logout =~ s/\s{20,}/ /g;
-
-  # If we are running the new version then there's a totally new parser here
-  # F-Secure 5.5 reports version 1.10
-  if ($fsecure_Version <= 3.0 || $fsecure_Version >= 4.50) {
-
-    #./g4UFLJR23090/Keld Jrn Simonsen: Infected: EICAR_Test_File [F-Prot]
-    #./g4UFLJR23090/Keld Jrn Simonsen: Infected: EICAR-Test-File [AVP]
-    #./g4UFLJR23090/cokegift.exe: Infected:   is a joke program [F-Prot]
-    # Version 4.61:
-    #./eicar.com: Infected: EICAR_Test_File [Libra]
-    #./eicar.com: Infected: EICAR Test File [Orion]
-    #./eicar.com: Infected: EICAR-Test-File [AVP]
-    #./eicar.doc: Infected: EICAR_Test_File [Libra]
-    #./eicar.doc: Infected: EICAR Test File [Orion]
-    #./eicar.doc: Infected: EICAR-Test-File [AVP]
-    #[./eicar.zip] eicar.com: Infected: EICAR_Test_File [Libra]
-    #[./eicar.zip] eicar.com: Infected: EICAR Test File [Orion]
-    #[./eicar.zip] eicar.com: Infected: EICAR-Test-File [AVP]
-
-
-    return 0 unless $line =~ /: Infected: /;
-    # The last 3 words are "Infected:" + name of virus + name of scanner
-    $line =~ s/: Infected: +(.+) \[.*?\]$//;
-    #print STDERR "Line is \"$line\"\n";
-    MailScanner::Log::NoticeLog("Virus Scanning: F-Secure found virus %s", $1);
-    # We are now left with the filename, or
-    # then archive name followed by the filename within the archive.
-    $line =~ s/^\[(.*?)\] .*$/$1/; # Strip signs of an archive
-
-    # We now just have the filename
-    ($dot,$id,$part,@rest) = split(/\//, $line);
-    my $notype = substr($part,1);
-    $logout =~ s/\Q$part\E/$notype/;
-    $report =~ s/\Q$part\E/$notype/;
-
-    MailScanner::Log::InfoLog($logout);
-    $report = $Name . ': ' . $report if $Name;
-    $infections->{"$id"}{"$part"} .= $report . "\n";
-    $types->{"$id"}{"$part"} .= "v"; # so we know what to tell sender
-    # Only report results once for each file
-    return 0 if $fsecure_Seen{$line};
-    $fsecure_Seen{$line} = 1;
-    return 1;
-  } else {
-    # We are running the old version, so use the old parser
-    # Prefer s/// to m// as less likely to do unpredictable things.
-    # We hope.
-    if ($line =~ /\tinfection:\s/) {
-      # Get to relevant filename in a reasonably but not
-      # totally robust manner (*impossible* to be totally robust
-      # if we have square brackets and spaces in filenames)
-      # Strip archive bits if present
-      $line =~ s/^\[(.*?)\] .+(\tinfection:.*)/$1$2/;
-  
-      # Get to the meat or die trying...
-      $line =~ s/\tinfection:([^:]*).*$//
-        or MailScanner::Log::DieLog("Dodgy things going on in F-Secure output:\n$report\n");
-      $virus = $1;
-      $virus =~ s/^\s*(\S+).*$/$1/; # 1st word after Infection: is the virus
-      MailScanner::Log::NoticeLog("Virus Scanning: F-Secure found virus %s",$virus);
-  
-      ($dot,$id,$part,@rest) = split(/\//, $line);
-      my $notype = substr($part,1);
-      $logout =~ s/\Q$part\E/$notype/;
-      $report =~ s/\Q$part\E/$notype/;
-
-      MailScanner::Log::InfoLog($logout);
-      $report = $Name . ': ' . $report if $Name;
-      $infections->{"$id"}{"$part"} .= $report . "\n";
-      $types->{"$id"}{"$part"} .= "v"; # so we know what to tell sender
-      return 1;
-    }
-    MailScanner::Log::DieLog("Either you've found a bug in MailScanner's F-Secure output parser, or F-Secure's output format has changed! Please mail the author of MailScanner!\n");
-  }
-}
-
 sub ProcessClamAVOutput {
   my($line, $infections, $types, $BaseDir, $Name, $spaminfre) = @_;
 
@@ -1723,7 +1642,6 @@ sub ProcessAvgOutput {
   return 1;
 }
 
-
 # Generate a list of all the virus scanners that are installed. It may
 # include extras that are not installed in the case where there are
 # scanners whose name includes a version number and we could not tell
@@ -1822,13 +1740,13 @@ sub ClamdScan {
   # If we don't have the required perl libs exit in a fashion the
   # parser will understand
   unless (eval ' require IO::Socket::INET ' ){
-    print "ERROR:: You Need IO-Socket-INET to use the clamd " .
+    print "ERROR:: You Need IO-Socket-INET To Use clamd " .
           "Scanner :: $dirname\n" unless $lintonly;
     print "ScAnNeRfAiLeD\n" unless $lintonly;
     return 1;
   }
     unless (eval ' require IO::Socket::UNIX ' ){
-    print "ERROR:: You Need IO-Socket-INET to use the clamd " .
+    print "ERROR:: You Need IO-Socket-INET To Use clamd " .
           "Scanner :: $dirname\n" unless $lintonly;
     print "ScAnNeRfAiLeD\n" unless $lintonly;
     return 1;
@@ -1958,7 +1876,7 @@ sub ClamdScan {
       return 1 unless $line eq "PONG";
       MailScanner::Log::DebugLog("ClamD is running\n");
     } else {
-      MailScanner::Log::WarnLog("clam daemon has an Unknown problem, recommend daemon restart") unless $lintonly;
+      MailScanner::Log::WarnLog("clam daemon has an Unknown problem, recommend you re-start the daemon!") unless $lintonly;
       print "ERROR:: CLAMD HAS AN UNKNOWN PROBLEM, RECOMMEND " .
             "DAEMON RESTART :: $dirname\n" unless $lintonly;
       print "ScAnNeRfAiLeD\n" unless $lintonly;
@@ -1995,7 +1913,7 @@ sub ClamdScan {
       if (time > $TimeOut) {
         MailScanner::Log::WarnLog("clamav daemon timed out");
         close($sock);
-        print "ERROR:: clam daemon TIME OUT :: " .
+        print "ERROR:: clam daemon TIMED OUT! :: " .
               "$dirname\n";
         print "ScAnNeRfAiLeD\n" unless $lintonly;
         return 1;
@@ -2041,7 +1959,7 @@ sub ClamdScan {
       # to report a null childname so the infection is mapped to the
       # entire message.
       if ($childname =~ /\.(?:header|message)$/ && $filename =~ /\sFOUND$/) {
-		$rest = $filename;
+	$rest = $filename;
         $filename = '';
         $childname =~ s/\.(?:header|message)$//;
         print "INFECTED::";

@@ -139,7 +139,7 @@ sub InternalDecoder {
 
   # Make the temporary tnef files be created under /tmp for easy removal.
   my $tempdir = tempdir();
-  chmod 0755, $tempdir;
+  chmod 0700, $tempdir;
   %parms = ( ignore_checksum => "true",
              output_dir      => $tempdir,
              output_to_core  => "NONE" );
@@ -170,6 +170,15 @@ sub InternalDecoder {
       #                                        UNLINK => 0);
       # file2parent must not contain the leading 't'.
       $safename = $message->MakeNameSafe('t'.($attachname->longname), $dir);
+      ## Olivier Diserens, for MailCleaner
+      if (!$handle) {
+          MailScanner::Log::WarnLog("Failed to unpack TNEF message %s, error with part %s.", $message->{id}, $safename);
+          undef $tnef;
+          system("rm -rf $tempdir");
+          return 1 if MailScanner::Config::Value('deliverunparsabletnef',$message);
+          return 0;
+      }
+      ## end MailCleaner
       #print STDERR "Tempfile = $safename\n";
       $message->{file2parent}{substr($safename,1)} = $tnefname;
       $message->{file2parent}{$safename} = $tnefname; # For good measure!

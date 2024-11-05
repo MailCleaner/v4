@@ -42,8 +42,17 @@
 # unless MailScanner actually had to be started.
 
 process=MailScanner
-msbindir=/usr/sbin
-config=/etc/MailScanner/MailScanner.conf
+## MailCleaner
+SRCDIR=`grep 'SRCDIR' /etc/mailcleaner.conf | cut -d ' ' -f3`
+if [ "SRCDIR" = "" ]; then
+  SRCDIR=/usr/mailcleaner
+fi
+
+#msbindir=/usr/sbin
+#config=/etc/MailScanner/MailScanner.conf
+msbindir=/opt/MailScanner/bin
+config=$SRCDIR"/etc/mailscanner/MailScanner.conf"
+## end MailCleaner
 
 # These seem to get put all over the shop...
 PATH=/usr/bin:/bin
@@ -119,10 +128,15 @@ if [ "x$pid" = "x" ]; then
   ulimit -n 2000 >/dev/null 2>&1
   # Restart it
   PATH=${msbindir}:$PATH
-  echo -n 'Starting MailScanner ...'
+  ## MailCleaner
+  #echo -n 'Starting MailScanner...'
   cd $msbindir
-  $process $config 2>/dev/null || RETVALUE=" Failed."
-  echo "$RETVALUE"
+  #$process $config 2>/dev/null || RETVALUE=" Failed."
+  $process $config
+  if [ "$RETVALUE" != " Done." ]; then
+    echo "$RETVALUE"
+  fi
+  ## end MailCleaner
 else
   if [ "x$1" != "x-q" ]; then
     echo MailScanner running with pid $pid
